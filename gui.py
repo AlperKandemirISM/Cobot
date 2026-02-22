@@ -159,18 +159,20 @@ class AngleKnob(tk.Canvas):
 
 
 class ServoControllerGUI:
-    """GUI for ST3215 Servo Control"""
+    """GUI for ST3215 Servo Control - Multi-Servo Version"""
 
-    def __init__(self, root, callbacks):
+    def __init__(self, root, callbacks, multi_servo=True):
         """
         Initialize the GUI
 
         Args:
             root: tkinter root window
             callbacks: Dictionary of callback functions
+            multi_servo: Boolean indicating if multi-servo mode is enabled
         """
         self.root = root
         self.callbacks = callbacks
+        self.multi_servo = multi_servo
 
         # Widget references
         self.knob_widget = None
@@ -188,17 +190,19 @@ class ServoControllerGUI:
         self.current_label = None
         self.load_label = None
         self.moving_label = None
+        self.servo_selector = None
+        self.servo_buttons = {}
 
         self.setup_gui()
 
     def setup_gui(self):
         """Set up the complete GUI layout"""
-        self.root.title("ST3215 Servo Control")
+        self.root.title("ST3215 Multi-Servo Control")
         self.root.geometry("1400x700")
         self.root.configure(bg="#f0f0f0")
 
         # Title
-        title_label = tk.Label(self.root, text="ST3215 Servo Controller",
+        title_label = tk.Label(self.root, text="ST3215 Multi-Servo Controller",
                                font=("Arial", 18, "bold"), bg="#f0f0f0")
         title_label.grid(row=0, column=0, columnspan=3, pady=10)
 
@@ -212,15 +216,81 @@ class ServoControllerGUI:
                                         font=("Arial", 14, "bold"), fg="gray", bg="#f0f0f0")
         self.direction_label.grid(row=2, column=0, columnspan=3, pady=5)
 
+        # Servo selector (if multi-servo mode)
+        if self.multi_servo:
+            self.setup_servo_selector()
+
         # Create left, middle, and right frames
         self.setup_left_frame()
         self.setup_middle_frame()
         self.setup_right_frame()
 
+    def setup_servo_selector(self):
+        """Set up servo selector buttons"""
+        selector_frame = tk.Frame(self.root, bg="#f0f0f0")
+        selector_frame.grid(row=3, column=0, columnspan=3, pady=5)
+
+        tk.Label(selector_frame, text="Select Servo:", font=("Arial", 12, "bold"),
+                 bg="#f0f0f0").pack(side=tk.LEFT, padx=10)
+
+        # Create buttons for servos 1-4
+        for servo_id in [1, 2, 3, 4]:
+            btn = tk.Button(selector_frame, text=f"Servo {servo_id}",
+                            font=("Arial", 11, "bold"),
+                            command=lambda sid=servo_id: self.select_servo(sid),
+                            width=8, bg="#e0e0e0", state=tk.DISABLED)
+            btn.pack(side=tk.LEFT, padx=5)
+            self.servo_buttons[servo_id] = btn
+
+    def select_servo(self, servo_id):
+        """Handle servo selection"""
+        # Update button states
+        for sid, btn in self.servo_buttons.items():
+            if sid == servo_id:
+                btn.config(bg="#4169e1", fg="white")
+            else:
+                btn.config(bg="#e0e0e0", fg="black")
+
+        # Call callback
+        if 'switch_servo' in self.callbacks:
+            self.callbacks['switch_servo'](servo_id)
+
+    def update_servo_selector(self, servo_ids, status_dict):
+        """Update servo selector with connection status"""
+        for servo_id in servo_ids:
+            if servo_id in self.servo_buttons:
+                if status_dict.get(servo_id) == "Connected":
+                    self.servo_buttons[servo_id].config(
+                        bg="#90EE90",  # Light green
+                        state=tk.NORMAL
+                    )
+                else:
+                    self.servo_buttons[servo_id].config(
+                        bg="#ffcccc",  # Light red
+                        text=f"Servo {servo_id}\n(Offline)",
+                        state=tk.DISABLED
+                    )
+
+    def update_servo_status_indicators(self, status_dict):
+        """Update servo status indicators (can be called from monitor thread)"""
+        for servo_id, status in status_dict.items():
+            if servo_id in self.servo_buttons:
+                if isinstance(status, dict) and status.get('moving', False):
+                    # Moving indicator - flash or change color
+                    current_bg = self.servo_buttons[servo_id].cget('bg')
+                    if current_bg != "#FFD700":  # Not already gold
+                        self.servo_buttons[servo_id].config(bg="#FFD700")  # Gold when moving
+                elif isinstance(status, str) and status == "Connected":
+                    self.servo_buttons[servo_id].config(bg="#90EE90")  # Green when connected
+                elif isinstance(status, str) and status == "Disconnected":
+                    self.servo_buttons[servo_id].config(bg="#ffcccc")  # Red when disconnected
+
     def setup_left_frame(self):
         """Set up left control panel"""
         left_frame = tk.Frame(self.root, bg="#f0f0f0")
-        left_frame.grid(row=3, column=0, padx=20, sticky="n")
+        # Adjust row based on whether selector is present
+        row = 4 if self.multi_servo else 3
+        left_frame.grid(row=row, column=0, padx=20, sticky="n")
 
         # Speed control
         self.speed_label = tk.Label(left_frame, text=f"Speed: 10%",
@@ -333,10 +403,12 @@ class ServoControllerGUI:
 
     def setup_middle_frame(self):
         """Set up middle knob control"""
+        # Adjust row based on whether selector is present
+        row = 4 if self.multi_servo else 3
         middle_frame = tk.LabelFrame(self.root, text="Visual Angle Control",
                                      font=("Arial", 14, "bold"), bg="#f0f0f0",
                                      padx=10, pady=10)
-        middle_frame.grid(row=3, column=1, padx=20, sticky="n")
+        middle_frame.grid(row=row, column=1, padx=20, sticky="n")
 
         self.knob_widget = AngleKnob(middle_frame, size=280)
         self.knob_widget.pack(pady=10)
@@ -347,10 +419,17 @@ class ServoControllerGUI:
 
     def setup_right_frame(self):
         """Set up right telemetry panel"""
+        # Adjust row based on whether selector is present
+        row = 4 if self.multi_servo else 3
         right_frame = tk.LabelFrame(self.root, text="Real-Time Telemetry",
                                     font=("Arial", 14, "bold"), bg="#f0f0f0",
                                     padx=20, pady=20)
-        right_frame.grid(row=3, column=2, padx=20, sticky="n")
+        right_frame.grid(row=row, column=2, padx=20, sticky="n")
+
+        # Add active servo indicator
+        self.active_servo_label = tk.Label(right_frame, text="Active Servo: --",
+                                           font=("Arial", 14, "bold"), bg="#f0f0f0", fg="blue")
+        self.active_servo_label.pack(pady=5)
 
         self.position_label = tk.Label(right_frame, text="Position: --",
                                        font=("Arial", 13), bg="#f0f0f0", anchor="w", width=30)
@@ -404,6 +483,16 @@ class ServoControllerGUI:
         """Update direction label"""
         self.direction_label.config(text=text, fg=fg)
 
+        # Also update active servo label if multi-servo
+        if self.multi_servo and hasattr(self, 'active_servo_label'):
+            if "Servo" in text:
+                # Extract servo ID from direction text
+                import re
+                match = re.search(r'Servo (\d+)', text)
+                if match:
+                    servo_id = match.group(1)
+                    self.active_servo_label.config(text=f"Active Servo: {servo_id}")
+
     def update_telemetry(self, telemetry_data):
         """Update all telemetry displays"""
         if 'position' in telemetry_data:
@@ -412,19 +501,32 @@ class ServoControllerGUI:
             self.position_label.config(text=f"Position: {pos} ({angle:.1f}°)")
 
         if 'speed' in telemetry_data:
-            self.actual_speed_label.config(text=f"Actual Speed: {telemetry_data['speed']}")
+            speed_val = telemetry_data['speed']
+            speed_text = f"{speed_val}" if speed_val != '--' else '--'
+            self.actual_speed_label.config(text=f"Actual Speed: {speed_text}")
 
         if 'temp' in telemetry_data:
-            self.temp_label.config(text=f"Temperature: {telemetry_data['temp']}°C")
+            temp_val = telemetry_data['temp']
+            temp_text = f"{temp_val}°C" if temp_val != '--' else '--°C'
+            self.temp_label.config(text=f"Temperature: {temp_text}")
 
         if 'voltage' in telemetry_data:
-            self.voltage_label.config(text=f"Voltage: {telemetry_data['voltage'] / 10:.1f}V")
+            volt_val = telemetry_data['voltage']
+            if volt_val != '--':
+                volt_text = f"{volt_val / 10:.1f}V"
+            else:
+                volt_text = '--V'
+            self.voltage_label.config(text=f"Voltage: {volt_text}")
 
         if 'current' in telemetry_data:
-            self.current_label.config(text=f"Current: {telemetry_data['current']}mA")
+            curr_val = telemetry_data['current']
+            curr_text = f"{curr_val}mA" if curr_val != '--' else '--mA'
+            self.current_label.config(text=f"Current: {curr_text}")
 
         if 'load' in telemetry_data:
-            self.load_label.config(text=f"Load: {telemetry_data['load']}%")
+            load_val = telemetry_data['load']
+            load_text = f"{load_val}%" if load_val != '--' else '--%'
+            self.load_label.config(text=f"Load: {load_text}")
 
         if 'moving' in telemetry_data:
             moving = telemetry_data['moving']

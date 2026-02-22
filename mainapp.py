@@ -1,80 +1,111 @@
 import time
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import ttk, messagebox
 from python_st3215 import ST3215, ServoNotRespondingError
 import threading
 import config
 from gui import ServoControllerGUI
 
 # Configuration
-SCS_ID = config.SERVO_CONFIG['default_id']
 portName = config.SERIAL_CONFIG['port']
 MAX_SPEED = config.get_servo_params()['max_speed']
 
 # Global variables
 controller = None
-servo = None
+servos = {}  # Dictionary to hold servo objects by ID
+active_servo_id = config.SERVO_CONFIG['default_id']  # Currently selected servo
+servo_status = {}  # Track status of each servo
 speed_percent = 10
-MAX_SPEED = 32766
 current_speed = 0
 direction = 0
 running = True
 monitoring = False
 comm_lock = threading.Lock()
-current_position = None
+current_positions = {}  # Track positions for all servos
 gui = None
-current_mode = 0  # Track mode: 0=Position, 1=Wheel
+current_modes = {}  # Track modes for each servo: 0=Position, 1=Wheel
+
+# Servo IDs to manage
+SERVO_IDS = [1, 2, 3, 4]
 
 
-def initialize_servo():
-    """Initialize servo connection and read initial position"""
-    global controller, servo, monitoring, current_position, current_mode
+def initialize_servos():
+    """Initialize connection to all servos"""
+    global controller, monitoring
     try:
-        # Use config values
         controller = ST3215(portName)
-        servo = controller.wrap_servo(SCS_ID)
-
-        # Get servo params from config
         servo_params = config.get_servo_params()
 
         print(f"=== INITIALIZATION ===")
         print(f"Port: {portName}")
-        print(f"Servo ID: {SCS_ID}")
         print(f"Servo Type: {config.SERVO_CONFIG['servo_type']}")
         print(f"Digital Range: {servo_params['digital_range']}")
         print(f"Angle Range: {servo_params['angle_range']}°")
 
-        # START IN POSITION MODE (not wheel mode!)
-        print("=== INITIALIZATION ===")
-        print("Setting to POSITION mode (mode 0)...")
-        servo.eeprom.write_operating_mode(0)
-        time.sleep(0.5)
-        current_mode = 0
+        # Initialize each servo
+        connected_count = 0
+        for servo_id in SERVO_IDS:
+            try:
+                servo = controller.wrap_servo(servo_id)
 
-        servo.sram.torque_enable()
-        time.sleep(0.1)
+                # Test communication by reading a register that definitely exists
+                # Use read_current_location() as a connection test
+                test_pos = servo.sram.read_current_location()
+                if test_pos is not None:
+                    servos[servo_id] = servo
 
-        # Read initial position on startup
-        current_position = servo.sram.read_current_location()
-        if current_position is not None:
-            angle = (current_position / 4096.0) * 360.0
-            gui.update_telemetry({
-                'position': current_position,
-                'angle': angle
-            })
-            gui.set_knob_angle(angle)
-            print(f"=== STARTUP ===")
-            print(f"Initial position: {current_position}")
-            print(f"Initial angle: {angle:.1f}°")
-            print(f"Operating mode: {current_mode} (Position Mode)")
+                    # Set to position mode initially
+                    print(f"Servo ID {servo_id}: Setting to POSITION mode (mode 0)...")
+                    servo.eeprom.write_operating_mode(0)
+                    time.sleep(0.2)
+                    current_modes[servo_id] = 0
 
-        gui.update_status("✓ Servo connected (Position Mode)", "green")
+                    # Enable torque
+                    servo.sram.torque_enable()
+                    time.sleep(0.1)
+
+                    # Read initial position
+                    pos = servo.sram.read_current_location()
+                    if pos is not None:
+                        current_positions[servo_id] = pos
+                        angle = (pos / 4096.0) * 360.0
+                        print(f"  ID {servo_id}: Initial position={pos}, angle={angle:.1f}°")
+
+                    servo_status[servo_id] = "Connected"
+                    connected_count += 1
+                    print(f"✓ Servo ID {servo_id} connected successfully")
+                else:
+                    print(f"Servo ID {servo_id}: Failed to read position")
+                    servos[servo_id] = None
+                    servo_status[servo_id] = "Disconnected"
+
+            except Exception as e:
+                print(f"Servo ID {servo_id}: Failed to connect - {e}")
+                servos[servo_id] = None
+                servo_status[servo_id] = "Disconnected"
+
+        # Update GUI with connection status
+        if connected_count > 0:
+            status_text = f"✓ Connected to {connected_count} servos"
+            gui.update_status(status_text, "green")
+
+            # Update servo selector
+            gui.update_servo_selector(SERVO_IDS, servo_status)
+
+            # Select first connected servo
+            for sid in SERVO_IDS:
+                if servo_status[sid] == "Connected":
+                    switch_active_servo(sid)
+                    break
+        else:
+            gui.update_status("✗ No servos connected!", "red")
+            return False
+
+        # Start monitoring thread
         monitoring = True
-        threading.Thread(target=monitor_servo, daemon=True).start()
+        threading.Thread(target=monitor_all_servos, daemon=True).start()
         return True
-    except ServoNotRespondingError:
-        gui.update_status("✗ Cannot connect to servo!", "red")
-        return False
+
     except Exception as e:
         print(f"Initialization error: {e}")
         import traceback
@@ -83,45 +114,105 @@ def initialize_servo():
         return False
 
 
-def monitor_servo():
-    """Background thread to read servo telemetry continuously"""
-    global current_position
+def switch_active_servo(servo_id):
+    """Switch the active servo being controlled"""
+    global active_servo_id
+
+    if servo_id in servos and servos[servo_id] is not None:
+        active_servo_id = servo_id
+        print(f"Switched to servo ID {servo_id}")
+
+        # Update GUI with current position of selected servo
+        if servo_id in current_positions:
+            pos = current_positions[servo_id]
+            angle = (pos / 4096.0) * 360.0
+            gui.set_knob_angle(angle)
+
+            # Update direction label based on mode
+            mode = current_modes.get(servo_id, 0)
+            if mode == 0:
+                gui.update_direction(f"Servo {servo_id}: Position Mode", "blue")
+            else:
+                gui.update_direction(f"Servo {servo_id}: Wheel Mode", "orange")
+
+        # Update telemetry for this servo
+        update_active_servo_telemetry()
+
+
+def monitor_all_servos():
+    """Background thread to read telemetry from all servos"""
     while running and monitoring:
         try:
-            if servo and not comm_lock.locked():
-                with comm_lock:
-                    position = servo.sram.read_current_location()
-                    speed = servo.sram.read_current_speed()
-                    temp = servo.sram.read_current_temperature()
-                    voltage = servo.sram.read_current_voltage()
-                    current = servo.sram.read_current_current()
-                    load = servo.sram.read_current_load()
-                    moving = servo.sram.is_moving()
+            for servo_id, servo in servos.items():
+                if servo and not comm_lock.locked():
+                    try:
+                        with comm_lock:
+                            position = servo.sram.read_current_location()
+                            if position is not None:
+                                current_positions[servo_id] = position
 
-                # Update current position global variable
-                if position is not None:
-                    current_position = position
-                    angle = (position / 4096.0) * 360.0
+                                # Read other telemetry
+                                speed = servo.sram.read_current_speed()
+                                temp = servo.sram.read_current_temperature()
+                                voltage = servo.sram.read_current_voltage()
+                                current_val = servo.sram.read_current_current()
+                                load = servo.sram.read_current_load()
+                                moving = servo.sram.is_moving()
 
-                    # Update GUI
-                    telemetry_data = {
-                        'position': position,
-                        'angle': angle,
-                        'speed': speed if speed is not None else '--',
-                        'temp': temp if temp is not None else '--',
-                        'voltage': voltage if voltage is not None else '--',
-                        'current': current if current is not None else '--',
-                        'load': load if load is not None else '--',
-                        'moving': moving if moving is not None else False
-                    }
+                                # Store telemetry
+                                servo_status[servo_id] = {
+                                    'position': position,
+                                    'speed': speed,
+                                    'temp': temp,
+                                    'voltage': voltage,
+                                    'current': current_val,
+                                    'load': load,
+                                    'moving': moving
+                                }
+                    except Exception as e:
+                        # Silently ignore communication errors for individual servos
+                        pass
 
-                    gui.root.after(0, lambda d=telemetry_data: gui.update_telemetry(d))
-                    gui.root.after(0, lambda a=angle: gui.set_knob_angle(a))
+            # Update GUI with active servo's telemetry
+            if active_servo_id in servo_status:
+                gui.root.after(0, lambda: update_active_servo_telemetry())
+
+            # Update servo selector status indicators
+            gui.root.after(0, lambda: gui.update_servo_status_indicators(servo_status))
 
         except Exception as e:
             pass
 
         time.sleep(0.2)
+
+
+def update_active_servo_telemetry():
+    """Update GUI with telemetry from active servo"""
+    if active_servo_id in servo_status:
+        data = servo_status[active_servo_id]
+        if isinstance(data, dict):
+            # Calculate angle
+            if 'position' in data and data['position'] is not None:
+                angle = (data['position'] / 4096.0) * 360.0
+                telemetry = {
+                    'position': data['position'],
+                    'angle': angle,
+                    'speed': data.get('speed', '--'),
+                    'temp': data.get('temp', '--'),
+                    'voltage': data.get('voltage', '--'),
+                    'current': data.get('current', '--'),
+                    'load': data.get('load', '--'),
+                    'moving': data.get('moving', False)
+                }
+                gui.update_telemetry(telemetry)
+                gui.set_knob_angle(angle)
+
+
+def get_active_servo():
+    """Get the currently active servo object"""
+    if active_servo_id in servos:
+        return servos[active_servo_id]
+    return None
 
 
 def update_speed():
@@ -132,90 +223,106 @@ def update_speed():
 
 def stop_servo():
     """Stop all servo movement and switch back to position mode"""
-    global direction, current_mode
-    if servo:
-        with comm_lock:
-            servo.sram.write_running_speed(0)
+    global direction
+
+    servo = get_active_servo()
+    if not servo:
+        messagebox.showwarning("Warning", f"Servo {active_servo_id} not connected")
+        return
+
+    servo_id = active_servo_id
+
+    with comm_lock:
+        servo.sram.write_running_speed(0)
+        time.sleep(0.3)
+
+        # If in wheel mode, switch back to position mode
+        if current_modes.get(servo_id) == 1:
+            print(f"Servo {servo_id}: Switching back to position mode...")
+            servo.eeprom.write_operating_mode(0)
             time.sleep(0.3)
+            current_modes[servo_id] = 0
+            servo.sram.torque_enable()
+            gui.update_status(f"✓ Servo {servo_id} (Position Mode)", "green")
 
-            # If in wheel mode, switch back to position mode
-            if current_mode == 1:
-                print("Stopping: Switching back to position mode...")
-                servo.eeprom.write_operating_mode(0)
-                time.sleep(0.3)
-                current_mode = 0
-                servo.sram.torque_enable()
-                if gui:
-                    gui.update_status("✓ Servo connected (Position Mode)", "green")
-
-        direction = 0
-        if gui:
-            gui.update_direction("Direction: STOPPED", "gray")
+    direction = 0
+    gui.update_direction(f"Servo {servo_id}: STOPPED", "gray")
 
 
 def move_cw():
     """Start continuous clockwise rotation - switches to WHEEL MODE"""
-    global direction, current_mode
+    global direction
+
+    servo = get_active_servo()
     if not servo:
+        messagebox.showwarning("Warning", f"Servo {active_servo_id} not connected")
         return
+
+    servo_id = active_servo_id
 
     with comm_lock:
         # Switch to wheel mode for continuous rotation
-        if current_mode == 0:
-            print("CW: Switching to wheel mode for continuous rotation...")
+        if current_modes.get(servo_id) == 0:
+            print(f"Servo {servo_id}: Switching to wheel mode for continuous rotation...")
             servo.sram.write_running_speed(0)
             time.sleep(0.2)
             servo.eeprom.write_operating_mode(1)
             time.sleep(0.3)
-            current_mode = 1
+            current_modes[servo_id] = 1
             servo.sram.torque_enable()
             time.sleep(0.2)
 
         direction = 1
         # For CW rotation (clockwise), use NEGATIVE speed
-        # Remove the inverted calculation, use direct negative speed
-        cw_speed = -current_speed  # Simple negative for clockwise
+        cw_speed = -current_speed
         servo.sram.write_running_speed(cw_speed)
 
-    # Update GUI through the gui object
-    if gui:
-        gui.update_direction("Direction: CLOCKWISE ➜ (Wheel Mode)", "blue")
-        gui.update_status("✓ Wheel Mode (Continuous Rotation)", "blue")
+    gui.update_direction(f"Servo {servo_id}: CLOCKWISE ➜ (Wheel Mode)", "blue")
+    gui.update_status(f"✓ Servo {servo_id} - Wheel Mode", "blue")
+
 
 def move_ccw():
     """Start continuous counter-clockwise rotation - switches to WHEEL MODE"""
-    global direction, current_mode
+    global direction
+
+    servo = get_active_servo()
     if not servo:
+        messagebox.showwarning("Warning", f"Servo {active_servo_id} not connected")
         return
+
+    servo_id = active_servo_id
 
     with comm_lock:
         # Switch to wheel mode for continuous rotation
-        if current_mode == 0:
-            print("CCW: Switching to wheel mode for continuous rotation...")
+        if current_modes.get(servo_id) == 0:
+            print(f"Servo {servo_id}: Switching to wheel mode for continuous rotation...")
             servo.sram.write_running_speed(0)
             time.sleep(0.2)
             servo.eeprom.write_operating_mode(1)
             time.sleep(0.3)
-            current_mode = 1
+            current_modes[servo_id] = 1
             servo.sram.torque_enable()
             time.sleep(0.2)
 
         direction = -1
-        # For CCW rotation (counter-clockwise), use POSITIVE speed
+        # For CCW rotation, use POSITIVE speed
         servo.sram.write_running_speed(current_speed)
 
-    # Update GUI through the gui object
-    if gui:
-        gui.update_direction("Direction: ← COUNTER-CLOCKWISE (Wheel Mode)", "orange")
-        gui.update_status("✓ Wheel Mode (Continuous Rotation)", "orange")
-
+    gui.update_direction(f"Servo {servo_id}: ← COUNTER-CLOCKWISE (Wheel Mode)", "orange")
+    gui.update_status(f"✓ Servo {servo_id} - Wheel Mode", "orange")
 
 
 def go_to_angle_cw():
-    """Go to absolute angle (0-360°) - reads from CW input field - STAYS IN POSITION MODE"""
-    global current_mode
+    """Go to absolute angle - reads from CW input field"""
+    servo = get_active_servo()
+    if not servo:
+        messagebox.showwarning("Warning", f"Servo {active_servo_id} not connected")
+        return
+
+    servo_id = active_servo_id
+
     try:
-        target_angle = float(gui.get_cw_angle())  # ← Read from CW field!
+        target_angle = float(gui.get_cw_angle())
         if target_angle < 0 or target_angle > 360:
             messagebox.showerror("Error", "Angle must be between 0 and 360")
             return
@@ -224,18 +331,18 @@ def go_to_angle_cw():
         if target_position >= 4096:
             target_position = 4095
 
-        print(f"\n=== GO TO {target_angle}° (CW) ===")
+        print(f"\n=== Servo {servo_id}: GO TO {target_angle}° (CW) ===")
         print(f"Target position: {target_position}")
 
         with comm_lock:
             # Ensure we're in position mode
-            if current_mode == 1:
-                print("Switching from wheel to position mode...")
+            if current_modes.get(servo_id) == 1:
+                print(f"Switching from wheel to position mode...")
                 servo.sram.write_running_speed(0)
                 time.sleep(0.3)
                 servo.eeprom.write_operating_mode(0)
                 time.sleep(0.3)
-                current_mode = 0
+                current_modes[servo_id] = 0
                 servo.sram.torque_enable()
                 time.sleep(0.2)
 
@@ -247,69 +354,52 @@ def go_to_angle_cw():
                 current_ang = (current_pos / 4096.0) * 360.0
                 print(f"Current position: {current_pos} ({current_ang:.1f}°)")
 
-            print("Already in position mode, moving...")
-            servo.sram.torque_enable()
-            time.sleep(0.1)
-
             speed = int(MAX_SPEED * 0.3)
-            print(f"Setting speed: {speed}, acceleration: 100")
             servo.sram.write_running_speed(speed)
             servo.sram.write_acceleration(100)
             time.sleep(0.1)
 
-            print(f"Moving to position {target_position}...")
             servo.sram.write_target_location(target_position)
 
-        gui.update_status(f"Moving to {target_angle}°...", "blue")
+        gui.update_status(f"Servo {servo_id}: Moving to {target_angle}°...", "blue")
 
         def monitor_movement():
-            print("Monitoring movement...")
             time.sleep(1)
-
             for i in range(50):
                 with comm_lock:
                     current_pos = servo.sram.read_current_location()
                     is_moving = servo.sram.is_moving()
 
-                if current_pos is not None:
-                    current_ang = (current_pos / 4096.0) * 360.0
-                    print(
-                        f"Position: {current_pos} ({current_ang:.1f}°), Target: {target_position}, Moving: {is_moving}")
-
                 if current_pos and abs(current_pos - target_position) < 20:
-                    print(f"✓ Reached target!")
                     break
-
                 if not is_moving and i > 5:
-                    print("Movement stopped")
                     break
-
                 time.sleep(0.2)
 
-            # STAY IN POSITION MODE - just stop movement
-            print("Stopping movement (staying in position mode)...")
             with comm_lock:
                 servo.sram.write_running_speed(0)
 
-            print("Done!\n")
-            gui.update_status("✓ Servo connected (Position Mode)", "green")
+            gui.update_status(f"✓ Servo {servo_id} (Position Mode)", "green")
 
         threading.Thread(target=monitor_movement, daemon=True).start()
 
     except ValueError:
         messagebox.showerror("Error", "Please enter a valid number")
     except Exception as e:
-        print(f"ERROR: {e}")
-        import traceback
-        traceback.print_exc()
         messagebox.showerror("Error", f"Error: {str(e)}")
 
 
 def go_to_angle_ccw():
-    """Go to absolute angle (0-360°) - reads from CCW input field - STAYS IN POSITION MODE"""
-    global current_mode
+    """Go to absolute angle - reads from CCW input field"""
+    servo = get_active_servo()
+    if not servo:
+        messagebox.showwarning("Warning", f"Servo {active_servo_id} not connected")
+        return
+
+    servo_id = active_servo_id
+
     try:
-        target_angle = float(gui.get_ccw_angle())  # ← Read from CCW field!
+        target_angle = float(gui.get_ccw_angle())
         if target_angle < 0 or target_angle > 360:
             messagebox.showerror("Error", "Angle must be between 0 and 360")
             return
@@ -318,18 +408,18 @@ def go_to_angle_ccw():
         if target_position >= 4096:
             target_position = 4095
 
-        print(f"\n=== GO TO {target_angle}° (CCW) ===")
+        print(f"\n=== Servo {servo_id}: GO TO {target_angle}° (CCW) ===")
         print(f"Target position: {target_position}")
 
         with comm_lock:
             # Ensure we're in position mode
-            if current_mode == 1:
-                print("Switching from wheel to position mode...")
+            if current_modes.get(servo_id) == 1:
+                print(f"Switching from wheel to position mode...")
                 servo.sram.write_running_speed(0)
                 time.sleep(0.3)
                 servo.eeprom.write_operating_mode(0)
                 time.sleep(0.3)
-                current_mode = 0
+                current_modes[servo_id] = 0
                 servo.sram.torque_enable()
                 time.sleep(0.2)
 
@@ -341,90 +431,70 @@ def go_to_angle_ccw():
                 current_ang = (current_pos / 4096.0) * 360.0
                 print(f"Current position: {current_pos} ({current_ang:.1f}°)")
 
-            print("Already in position mode, moving...")
-            servo.sram.torque_enable()
-            time.sleep(0.1)
-
             speed = int(MAX_SPEED * 0.3)
-            print(f"Setting speed: {speed}, acceleration: 100")
             servo.sram.write_running_speed(speed)
             servo.sram.write_acceleration(100)
             time.sleep(0.1)
 
-            print(f"Moving to position {target_position}...")
             servo.sram.write_target_location(target_position)
 
-        gui.update_status(f"Moving to {target_angle}°...", "blue")
+        gui.update_status(f"Servo {servo_id}: Moving to {target_angle}°...", "blue")
 
         def monitor_movement():
-            print("Monitoring movement...")
             time.sleep(1)
-
             for i in range(50):
                 with comm_lock:
                     current_pos = servo.sram.read_current_location()
                     is_moving = servo.sram.is_moving()
 
-                if current_pos is not None:
-                    current_ang = (current_pos / 4096.0) * 360.0
-                    print(
-                        f"Position: {current_pos} ({current_ang:.1f}°), Target: {target_position}, Moving: {is_moving}")
-
                 if current_pos and abs(current_pos - target_position) < 20:
-                    print(f"✓ Reached target!")
                     break
-
                 if not is_moving and i > 5:
-                    print("Movement stopped")
                     break
-
                 time.sleep(0.2)
 
-            # STAY IN POSITION MODE - just stop movement
-            print("Stopping movement (staying in position mode)...")
             with comm_lock:
                 servo.sram.write_running_speed(0)
 
-            print("Done!\n")
-            gui.update_status("✓ Servo connected (Position Mode)", "green")
+            gui.update_status(f"✓ Servo {servo_id} (Position Mode)", "green")
 
         threading.Thread(target=monitor_movement, daemon=True).start()
 
     except ValueError:
         messagebox.showerror("Error", "Please enter a valid number")
     except Exception as e:
-        print(f"ERROR: {e}")
-        import traceback
-        traceback.print_exc()
         messagebox.showerror("Error", f"Error: {str(e)}")
 
 
 def increment_angle_cw():
-    """Move by increment angle in positive direction - STAYS IN POSITION MODE"""
-    global current_mode
+    """Move by increment angle in positive direction"""
+    servo = get_active_servo()
+    if not servo:
+        messagebox.showwarning("Warning", f"Servo {active_servo_id} not connected")
+        return
+
+    servo_id = active_servo_id
+
     try:
         increment = float(gui.get_increment())
-        print(f"\n=== INCREMENT +{increment}° ===")
+        print(f"\n=== Servo {servo_id}: INCREMENT +{increment}° ===")
 
         with comm_lock:
             # Ensure we're in position mode
-            if current_mode == 1:
-                print("Switching from wheel to position mode...")
+            if current_modes.get(servo_id) == 1:
+                print(f"Switching from wheel to position mode...")
                 servo.sram.write_running_speed(0)
                 time.sleep(0.3)
                 servo.eeprom.write_operating_mode(0)
                 time.sleep(0.3)
-                current_mode = 0
+                current_modes[servo_id] = 0
                 servo.sram.torque_enable()
                 time.sleep(0.2)
 
             servo.sram.write_running_speed(0)
             time.sleep(0.3)
 
-        with comm_lock:
             current_pos = servo.sram.read_current_location()
-            print(f"Current position: {current_pos}")
-
             if current_pos is None:
                 messagebox.showwarning("Warning", "Cannot read position")
                 return
@@ -435,89 +505,66 @@ def increment_angle_cw():
             if target_position >= 4096:
                 target_position = 4095
 
-            print(f"Current: {current_angle:.1f}°")
-            print(f"Target: {target_angle:.1f}°")
-            print(f"Target position: {target_position}")
-
-            print("Already in position mode, moving...")
-            servo.sram.torque_enable()
-            time.sleep(0.1)
-
             speed = int(MAX_SPEED * 0.2)
-            print(f"Setting speed: {speed}, acceleration: 100")
             servo.sram.write_running_speed(speed)
             servo.sram.write_acceleration(100)
             time.sleep(0.1)
 
-            print(f"Moving to position {target_position}...")
             servo.sram.write_target_location(target_position)
 
-        gui.update_status(f"Moving +{increment}° → {target_angle:.1f}°", "blue")
+        gui.update_status(f"Servo {servo_id}: Moving +{increment}° → {target_angle:.1f}°", "blue")
 
         def monitor_movement():
-            print("Monitoring...")
             time.sleep(1)
-
             for i in range(20):
                 with comm_lock:
                     moving = servo.sram.is_moving()
-                    current = servo.sram.read_current_location()
-
-                if current:
-                    current_ang = (current / 4096.0) * 360.0
-                    print(f"Position: {current} ({current_ang:.1f}°), Moving: {moving}")
-
                 if not moving:
-                    print("✓ Complete!")
                     break
-
                 time.sleep(0.2)
 
-            # STAY IN POSITION MODE - just stop movement
-            print("Stopping movement (staying in position mode)...")
             with comm_lock:
                 servo.sram.write_running_speed(0)
 
-            print("Done!\n")
-            gui.update_status("✓ Servo connected (Position Mode)", "green")
+            gui.update_status(f"✓ Servo {servo_id} (Position Mode)", "green")
 
         threading.Thread(target=monitor_movement, daemon=True).start()
 
     except ValueError:
         messagebox.showerror("Error", "Enter valid number")
     except Exception as e:
-        print(f"ERROR: {e}")
-        import traceback
-        traceback.print_exc()
         messagebox.showerror("Error", f"Error: {str(e)}")
 
 
 def decrement_angle_cw():
-    """Move by increment angle in negative direction - STAYS IN POSITION MODE"""
-    global current_mode
+    """Move by increment angle in negative direction"""
+    servo = get_active_servo()
+    if not servo:
+        messagebox.showwarning("Warning", f"Servo {active_servo_id} not connected")
+        return
+
+    servo_id = active_servo_id
+
     try:
         increment = float(gui.get_increment())
-        print(f"\n=== DECREMENT -{increment}° ===")
+        print(f"\n=== Servo {servo_id}: DECREMENT -{increment}° ===")
 
         with comm_lock:
             # Ensure we're in position mode
-            if current_mode == 1:
-                print("Switching from wheel to position mode...")
+            if current_modes.get(servo_id) == 1:
+                print(f"Switching from wheel to position mode...")
                 servo.sram.write_running_speed(0)
                 time.sleep(0.3)
                 servo.eeprom.write_operating_mode(0)
                 time.sleep(0.3)
-                current_mode = 0
+                current_modes[servo_id] = 0
                 servo.sram.torque_enable()
                 time.sleep(0.2)
 
             servo.sram.write_running_speed(0)
             time.sleep(0.3)
 
-        with comm_lock:
             current_pos = servo.sram.read_current_location()
-            print(f"Current position: {current_pos}")
-
             if current_pos is None:
                 messagebox.showwarning("Warning", "Cannot read position")
                 return
@@ -528,60 +575,34 @@ def decrement_angle_cw():
             if target_position >= 4096:
                 target_position = 4095
 
-            print(f"Current: {current_angle:.1f}°")
-            print(f"Target: {target_angle:.1f}°")
-            print(f"Target position: {target_position}")
-
-            print("Already in position mode, moving...")
-            servo.sram.torque_enable()
-            time.sleep(0.1)
-
             speed = int(MAX_SPEED * 0.2)
-            print(f"Setting speed: {speed}, acceleration: 100")
             servo.sram.write_running_speed(speed)
             servo.sram.write_acceleration(100)
             time.sleep(0.1)
 
-            print(f"Moving to position {target_position}...")
             servo.sram.write_target_location(target_position)
 
-        gui.update_status(f"Moving -{increment}° → {target_angle:.1f}°", "orange")
+        gui.update_status(f"Servo {servo_id}: Moving -{increment}° → {target_angle:.1f}°", "orange")
 
         def monitor_movement():
-            print("Monitoring...")
             time.sleep(1)
-
             for i in range(20):
                 with comm_lock:
                     moving = servo.sram.is_moving()
-                    current = servo.sram.read_current_location()
-
-                if current:
-                    current_ang = (current / 4096.0) * 360.0
-                    print(f"Position: {current} ({current_ang:.1f}°), Moving: {moving}")
-
                 if not moving:
-                    print("✓ Complete!")
                     break
-
                 time.sleep(0.2)
 
-            # STAY IN POSITION MODE - just stop movement
-            print("Stopping movement (staying in position mode)...")
             with comm_lock:
                 servo.sram.write_running_speed(0)
 
-            print("Done!\n")
-            gui.update_status("✓ Servo connected (Position Mode)", "green")
+            gui.update_status(f"✓ Servo {servo_id} (Position Mode)", "green")
 
         threading.Thread(target=monitor_movement, daemon=True).start()
 
     except ValueError:
         messagebox.showerror("Error", "Enter valid number")
     except Exception as e:
-        print(f"ERROR: {e}")
-        import traceback
-        traceback.print_exc()
         messagebox.showerror("Error", f"Error: {str(e)}")
 
 
@@ -594,35 +615,43 @@ def decrement_angle_ccw():
 
 
 def debug_position():
+    """Debug current servo position and status"""
+    servo = get_active_servo()
+    if not servo:
+        messagebox.showwarning("Warning", f"Servo {active_servo_id} not connected")
+        return
+
+    servo_id = active_servo_id
+
     try:
         with comm_lock:
             pos = servo.sram.read_current_location()
             mode = servo.eeprom.read_operating_mode()
             target = servo.sram.read_target_location()
+            temp = servo.sram.read_current_temperature()
+            voltage = servo.sram.read_current_voltage()
 
         if pos is not None:
             angle = (pos / 4096.0) * 360.0
 
-            debug_text = f"""Position Information:
+            debug_text = f"""Servo ID: {servo_id}
 ========================
 Raw Position: {pos}
 Angle: {angle:.2f}°
 Operating Mode: {mode} (0=Position, 1=Wheel)
 Target Location: {target}
+Temperature: {temp}°C
+Voltage: {voltage / 10 if voltage else '--'}V
 
 Position Range: 0-4095 (4096 positions)
 Angle Range: 0-360°
-Current Global Variable: {current_position}
-Software Mode Tracking: {current_mode}
 """
 
-            messagebox.showinfo("Position Debug", debug_text)
+            messagebox.showinfo(f"Servo {servo_id} Debug", debug_text)
             print(debug_text)
 
     except Exception as e:
         print(f"Debug error: {e}")
-        import traceback
-        traceback.print_exc()
         messagebox.showerror("Error", f"Debug failed: {str(e)}")
 
 
@@ -661,24 +690,13 @@ def on_slider_change(val):
         move_ccw()
 
 
-def on_closing():
-    global running, monitoring
-    running = False
-    monitoring = False
-    if servo:
-        stop_servo()
-    if controller:
-        controller.close()
-    root.destroy()
-
-
-# ... (keep all the existing functions up to the on_closing function) ...
-
 def on_knob_angle_change(angle):
     """Handle knob angle changes"""
-    global current_mode
+    servo = get_active_servo()
     if not servo:
         return
+
+    servo_id = active_servo_id
 
     target_position = int((angle / 360.0) * 4096.0)
     if target_position >= 4096:
@@ -688,12 +706,12 @@ def on_knob_angle_change(angle):
         try:
             with comm_lock:
                 # Ensure we're in position mode
-                if current_mode == 1:
+                if current_modes.get(servo_id) == 1:
                     servo.sram.write_running_speed(0)
                     time.sleep(0.2)
                     servo.eeprom.write_operating_mode(0)
                     time.sleep(0.3)
-                    current_mode = 0
+                    current_modes[servo_id] = 0
                     servo.sram.torque_enable()
                     time.sleep(0.2)
 
@@ -706,6 +724,26 @@ def on_knob_angle_change(angle):
             print(f"Knob error: {e}")
 
     threading.Thread(target=move_servo, daemon=True).start()
+
+
+def on_closing():
+    global running, monitoring
+    running = False
+    monitoring = False
+    time.sleep(0.5)  # Give threads time to stop
+
+    # Stop all servos
+    for servo_id, servo in servos.items():
+        if servo:
+            try:
+                servo.sram.write_running_speed(0)
+                time.sleep(0.1)
+            except:
+                pass
+
+    if controller:
+        controller.close()
+    root.destroy()
 
 
 def setup_callbacks():
@@ -723,7 +761,8 @@ def setup_callbacks():
         'increase_speed': increase_speed,
         'decrease_speed': decrease_speed,
         'on_slider_change': on_slider_change,
-        'debug_position': debug_position
+        'debug_position': debug_position,
+        'switch_servo': switch_active_servo
     }
 
 
@@ -736,14 +775,14 @@ def main():
     # Setup callbacks
     callbacks = setup_callbacks()
 
-    # Create GUI
-    gui = ServoControllerGUI(root, callbacks)
+    # Create GUI (modified for multi-servo)
+    gui = ServoControllerGUI(root, callbacks, multi_servo=True)
 
     # Setup knob callback
     gui.set_knob_callback(on_knob_angle_change)
 
     update_speed()
-    root.after(100, initialize_servo)
+    root.after(100, initialize_servos)
     root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()
 
