@@ -25,9 +25,8 @@ current_positions = {}  # Track positions for all servos
 gui = None
 current_modes = {}  # Track modes for each servo: 0=Position, 1=Wheel
 
-# Servo IDs to manage
-SERVO_IDS = [1, 2, 3, 4]
-
+# Servo IDs to manage - 1'den 7'ye kadar
+SERVO_IDS = [1, 2, 3, 4, 5, 6, 7]  # 7. servo eklendi
 
 def initialize_servos():
     """Initialize connection to all servos"""
@@ -41,6 +40,7 @@ def initialize_servos():
         print(f"Servo Type: {config.SERVO_CONFIG['servo_type']}")
         print(f"Digital Range: {servo_params['digital_range']}")
         print(f"Angle Range: {servo_params['angle_range']}°")
+        print(f"Total Servos: {len(SERVO_IDS)} (1-7)")
 
         # Initialize each servo
         connected_count = 0
@@ -86,7 +86,7 @@ def initialize_servos():
 
         # Update GUI with connection status
         if connected_count > 0:
-            status_text = f"✓ Connected to {connected_count} servos"
+            status_text = f"✓ Connected to {connected_count}/7 servos"
             gui.update_status(status_text, "green")
 
             # Update servo selector

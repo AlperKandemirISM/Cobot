@@ -226,15 +226,15 @@ class ServoControllerGUI:
         self.setup_right_frame()
 
     def setup_servo_selector(self):
-        """Set up servo selector buttons"""
+        """Set up servo selector buttons for 7 servos"""
         selector_frame = tk.Frame(self.root, bg="#f0f0f0")
         selector_frame.grid(row=3, column=0, columnspan=3, pady=5)
 
         tk.Label(selector_frame, text="Select Servo:", font=("Arial", 12, "bold"),
                  bg="#f0f0f0").pack(side=tk.LEFT, padx=10)
 
-        # Create buttons for servos 1-4
-        for servo_id in [1, 2, 3, 4]:
+        # Create buttons for servos 1-7 (7 servo desteği)
+        for servo_id in [1, 2, 3, 4, 5, 6, 7]:
             btn = tk.Button(selector_frame, text=f"Servo {servo_id}",
                             font=("Arial", 11, "bold"),
                             command=lambda sid=servo_id: self.select_servo(sid),
